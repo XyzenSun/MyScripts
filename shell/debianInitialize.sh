@@ -1,20 +1,18 @@
 #!/bin/bash
 
 # ==============================================================================
-# 服务器初始化交互式脚本 (v3.2 - Root执行版，保留手动SSH配置)
+# Debian服务器初始化交互式脚本
 # 功能:
-# 1. 更新系统并安装 ufw, curl, wget
-# 2. 交互式设置防火墙要保护的SSH端口 (注意: 不会自动修改SSH服务)
-# 3. 以最佳实践方式配置 UFW 防火墙
-# 4. 交互式设置时区
-# 5. 交互式选择是否创建Swap，并自定义大小
-# 6. 交互式选择是否安装Docker，并指定一个用户加入docker组
+# 1.交互式选择是否更换APT源
+# 2. 更新系统并安装 ufw, curl, wget
+# 3. 交互式设置防火墙要保护的SSH端口 (不会自动修改SSH服务)
+# 4. 配置 UFW 防火墙
+# 5. 交互式设置时区
+# 6. 交互式选择是否创建Swap，并自定义大小
+# 7. 交互式选择是否安装Docker，并指定一个用户加入docker组
 #
-# 使用方法:
-# 1. 切换到root用户: su -  或  sudo su -
-# 2. 将此脚本上传到服务器
-# 3. chmod +x init_server_v3.2.sh
-# 4. ./init_server_v3.2.sh
+# 使用方法: bash <(curl -sSL https://raw.githubusercontent.com/XyzenSun/MyScripts/refs/heads/main/shell/debianInitialize.sh) 
+#
 # ==============================================================================
 
 # --- 配置颜色输出 ---
@@ -25,6 +23,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # --- 全局变量 ---
+CHANGE_MIRROR="yes"
 SSH_PORT=""
 TIMEZONE=""
 SWAP_SIZE_GB=""
@@ -38,6 +37,16 @@ log_info() { echo -e "${BLUE}[INFO] $1${NC}"; }
 log_success() { echo -e "${GREEN}[SUCCESS] $1${NC}"; }
 log_warning() { echo -e "${YELLOW}[WARNING] $1${NC}"; }
 log_error() { echo -e "${RED}[ERROR] $1${NC}"; }
+
+# 0. 询问是否更换软件源
+ask_change_mirror() {
+    read -p "$(echo -e ${YELLOW}"是否需要更换为速度更快的国内软件源(APT Mirror)? (y/n) [默认 y]: "${NC})" mirror_choice
+    if [[ "$mirror_choice" == "n" || "$mirror_choice" == "N" ]]; then
+        CHANGE_MIRROR="no"
+    else
+        CHANGE_MIRROR="yes"
+    fi
+}
 
 # 1. 询问SSH端口
 ask_ssh_port() {
@@ -55,7 +64,7 @@ ask_ssh_port() {
 
 # 2. 询问时区
 ask_timezone() {
-    DEFAULT_TIMEZONE="Asia/Singapore"
+    DEFAULT_TIMEZONE="Asia/Shanghai"
     read -p "$(echo -e ${YELLOW}"请输入您的时区 [默认为 ${DEFAULT_TIMEZONE}]: "${NC})" TIMEZONE_INPUT
     TIMEZONE=${TIMEZONE_INPUT:-$DEFAULT_TIMEZONE}
 }
@@ -105,7 +114,32 @@ ask_install_docker() {
     fi
 }
 
-# 5. 执行系统更新和软件安装
+# 5. (新) 更换软件源
+change_apt_mirror() {
+    log_info "正在准备更换APT软件源..."
+    # 检查curl是否安装，这是换源脚本的前提
+    if ! command -v curl &> /dev/null; then
+        log_warning "未找到 'curl' 命令，正在尝试安装..."
+        apt-get update >/dev/null 2>&1
+        apt-get install -y curl
+        if [ $? -ne 0 ]; then
+            log_error "安装 'curl' 失败。无法继续更换软件源，将使用系统默认源。请检查网络或手动安装curl。"
+            return 1
+        fi
+        log_success "'curl' 安装成功。"
+    fi
+    
+    log_info "即将执行换源脚本，请根据提示进行交互选择..."
+    sleep 2
+    bash <(curl -sSL https://linuxmirrors.cn/main.sh)
+    if [ $? -eq 0 ]; then
+        log_success "软件源更换脚本执行完成。"
+    else
+        log_error "软件源更换脚本执行失败或被取消。后续将使用原有软件源。"
+    fi
+}
+
+# 6. 执行系统更新和软件安装
 install_software() {
     log_info "开始更新系统并安装必要软件 (ufw, curl, wget)..."
     apt-get update >/dev/null 2>&1 && apt-get install -y ufw curl wget
@@ -116,28 +150,20 @@ install_software() {
     log_success "基础软件安装完成。"
 }
 
-# 6. 配置防火墙 (优化后)
+# 7. 配置防火墙
 configure_firewall() {
     log_info "配置防火墙(UFW)..."
-    # 添加必要的端口
     ufw allow 80/tcp comment 'Allow HTTP' >/dev/null
     ufw allow 443/tcp comment 'Allow HTTPS' >/dev/null
-    ufw allow 22/tcp comment 'Allow SSH fallback' >/dev/null # 始终允许22端口，作为安全后备
+    ufw allow 22/tcp comment 'Allow SSH fallback' >/dev/null
     log_info "已开放端口: 80 (HTTP), 443 (HTTPS), 22 (SSH后备)。"
-      # 3. 如果用户选择了自定义端口，也开放它
     if [[ "$SSH_PORT" != "22" ]]; then
         ufw allow ${SSH_PORT}/tcp comment 'Allow Custom SSH' >/dev/null
         log_info "已开放自定义SSH端口: ${SSH_PORT}。"
     fi
-    # 设定默认策略
     ufw default deny incoming >/dev/null
     ufw default allow outgoing >/dev/null
     log_info "防火墙默认策略已设置为: 拒绝所有入站，允许所有出站。"
-
-
-    
-  
-
     log_warning "即将启用防火墙！"
     ufw --force enable
     if [ $? -eq 0 ]; then
@@ -148,14 +174,14 @@ configure_firewall() {
     fi
 }
 
-# 7. 设置时区
+# 8. 设置时区
 set_timezone() {
     log_info "设置时区为 ${TIMEZONE}..."
     timedatectl set-timezone ${TIMEZONE}
     log_success "时区设置完成。"
 }
 
-# 8. 创建Swap文件
+# 9. 创建Swap文件
 create_swap_file() {
     log_info "开始创建 ${SWAP_SIZE_GB}GB 大小的Swap文件..."
     fallocate -l ${SWAP_SIZE_GB}G /swapfile
@@ -172,7 +198,7 @@ create_swap_file() {
     log_success "Swap创建并激活成功!"
 }
 
-# 9. 安装Docker
+# 10. 安装Docker
 install_docker() {
     log_info "开始使用Docker官方脚本安装Docker..."
     curl -fsSL https://get.docker.com -o get-docker.sh
@@ -202,11 +228,12 @@ fi
 
 clear
 echo "====================================================="
-echo "服务器初始化脚本"
+echo "      服务器初始化脚本 v3.3"
 echo "====================================================="
 echo
 
 # --- 收集用户信息 ---
+ask_change_mirror
 ask_ssh_port
 ask_timezone
 ask_and_configure_swap
@@ -217,6 +244,11 @@ clear
 echo "==============================================="
 echo "      请确认以下配置"
 echo "==============================================="
+if [ "$CHANGE_MIRROR" == "yes" ]; then
+    echo -e "更换国内软件源       : ${GREEN}是${NC}"
+else
+    echo -e "更换国内软件源       : ${YELLOW}否${NC}"
+fi
 echo -e "计划使用的SSH端口    : ${YELLOW}${SSH_PORT}${NC}"
 echo -e "系统时区             : ${YELLOW}${TIMEZONE}${NC}"
 if [ -n "$SWAP_SIZE_GB" ]; then
@@ -236,11 +268,12 @@ else
 fi
 echo
 echo -e "脚本将执行以下操作:"
-echo -e " 1. 安装 ufw, curl, wget 等基础软件"
-echo -e " 2. ${GREEN}配置 UFW 防火墙 (开放 80, 443, 22 和 ${SSH_PORT})${NC}"
-echo -e " 3. 设置系统时区"
-[ -n "$SWAP_SIZE_GB" ] && echo -e " 4. 创建 ${SWAP_SIZE_GB}GB Swap"
-[ "$INSTALL_DOCKER" == "yes" ] && echo -e " 5. 安装 Docker"
+[ "$CHANGE_MIRROR" == "yes" ] && echo -e " 1. ${GREEN}更换系统软件源 (APT Mirror) 以加速下载${NC}"
+echo -e " 2. 安装 ufw, curl, wget 等基础软件"
+echo -e " 3. ${GREEN}配置 UFW 防火墙 (开放 80, 443, 22 和 ${SSH_PORT})${NC}"
+echo -e " 4. 设置系统时区"
+[ -n "$SWAP_SIZE_GB" ] && echo -e " 5. 创建 ${SWAP_SIZE_GB}GB Swap"
+[ "$INSTALL_DOCKER" == "yes" ] && echo -e " 6. 安装 Docker"
 echo
 echo -e "${RED}重要提示: 本脚本不会修改SSH服务本身！执行完毕后，您必须手动修改 /etc/ssh/sshd_config 文件中的端口，并重启SSH服务，才能使用新端口 ${SSH_PORT} 登录！${NC}"
 echo
@@ -255,11 +288,15 @@ fi
 log_info "配置已确认，3秒后开始执行..."
 sleep 3
 
+# 根据用户选择执行可选操作
+if [ "$CHANGE_MIRROR" == "yes" ]; then
+    change_apt_mirror
+fi
+
 install_software
 configure_firewall
 set_timezone
 
-# 根据用户选择执行可选操作
 if [ -n "$SWAP_SIZE_GB" ]; then
     create_swap_file
 fi
