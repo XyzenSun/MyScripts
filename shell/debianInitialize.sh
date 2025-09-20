@@ -19,7 +19,7 @@
 # 11. 交互式选择是否启用unattended-upgrades自动安全更新
 #
 # 使用方法: bash <(curl -sSL https://raw.githubusercontent.com/XyzenSun/MyScripts/refs/heads/main/shell/debianInitialize.sh)
-#
+# 国内可用Github下载代理bash <(curl -sSL https://gh-proxy.com/https://raw.githubusercontent.com/XyzenSun/MyScripts/refs/heads/main/shell/debianInitialize.sh)
 # ==============================================================================
 
 # --- 配置颜色输出 ---
