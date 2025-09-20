@@ -12,6 +12,7 @@
 # 6.  交互式设置时区
 # 7.  交互式选择是否创建Swap，并自定义大小
 # 8.  交互式选择是否安装Docker，并:
+#     - 询问是否使用国内镜像源安装
 #     - 询问是否配置全局日志轮换
 #     - 指定一个用户加入docker组
 # 9.  交互式选择是否配置Zram压缩
@@ -35,6 +36,7 @@ SSH_PORT=""
 TIMEZONE=""
 SWAP_SIZE_GB=""
 INSTALL_DOCKER=""
+USE_DOCKER_MIRROR="no" # 新增: 是否使用Docker国内镜像源
 CONFIGURE_DOCKER_LOGS=""
 DOCKER_USER=""
 ENABLE_ZRAM=""
@@ -111,6 +113,14 @@ ask_install_docker() {
     if [[ "$docker_choice" == "y" || "$docker_choice" == "Y" ]]; then
         INSTALL_DOCKER="yes"
         
+        # 新增: 询问是否使用国内镜像源
+        read -p "$(echo -e ${YELLOW}"是否使用国内镜像源安装Docker (推荐国内服务器)? (y/n) [默认 y]: "${NC})" docker_mirror_choice
+        if [[ "$docker_mirror_choice" == "n" || "$docker_mirror_choice" == "N" ]]; then
+            USE_DOCKER_MIRROR="no"
+        else
+            USE_DOCKER_MIRROR="yes"
+        fi
+
         # 询问是否配置日志轮换
         read -p "$(echo -e ${YELLOW}"是否为Docker配置全局日志轮换 (10m*3个文件)? (y/n) [默认 y]: "${NC})" docker_log_choice
         if [[ "$docker_log_choice" == "n" || "$docker_log_choice" == "N" ]]; then
@@ -135,6 +145,7 @@ ask_install_docker() {
     else
         INSTALL_DOCKER="no"
         CONFIGURE_DOCKER_LOGS="no"
+        USE_DOCKER_MIRROR="no"
     fi
 }
 
@@ -340,18 +351,30 @@ create_swap_file() {
     log_success "Swap创建并激活成功!"
 }
 
-# 15. 安装Docker
+# 15. 安装Docker (已修改)
 install_docker() {
-    log_info "开始使用Docker官方脚本安装Docker..."
-    curl -fsSL https://get.docker.com -o get-docker.sh
-    sh get-docker.sh
-    if [ $? -ne 0 ]; then
-        log_error "Docker安装失败！请检查网络或手动执行 sh get-docker.sh 进行排查。"
+    local install_status=1 # 默认失败
+
+    if [ "$USE_DOCKER_MIRROR" == "yes" ]; then
+        log_info "开始使用国内镜像源脚本 (linuxmirrors.cn) 安装Docker..."
+        bash <(curl -sSL https://linuxmirrors.cn/docker.sh)
+        install_status=$?
+    else
+        log_info "开始使用Docker官方脚本安装Docker..."
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
+        install_status=$?
         rm -f get-docker.sh
-        return
     fi
+
+    # 统一检查安装结果
+    if [ $install_status -ne 0 ] || ! command -v docker &> /dev/null; then
+        log_error "Docker安装失败！请检查网络或手动执行安装脚本进行排查。"
+        return 1
+    fi
+    
     log_success "Docker安装成功！"
-    rm -f get-docker.sh
+
     if [ -n "$DOCKER_USER" ]; then
         log_info "将用户 '$DOCKER_USER' 添加到 'docker' 组..."
         usermod -aG docker "$DOCKER_USER"
@@ -360,7 +383,7 @@ install_docker() {
     fi
 }
 
-# 16. (新) 配置Docker日志轮换
+# 16. 配置Docker日志轮换
 configure_docker_logs() {
     log_info "开始为Docker配置全局日志轮换..."
     mkdir -p /etc/docker
@@ -376,7 +399,7 @@ configure_docker_logs() {
 EOF
 
     if [ $? -eq 0 ]; then
-        log_success "Docker日志配置文件 /etc/docker/daemon.json 创建成功。"
+        log_success "Docker日志配置文件 /etc/docker/daemon.json 创建/覆盖成功。"
         log_info "已将全局Docker日志设置为: 最多3个文件，每个文件最大10MB。"
         log_info "您可以随时通过编辑 /etc/docker/daemon.json 文件来修改此配置。"
         log_info "正在重启Docker以应用配置..."
@@ -506,6 +529,11 @@ else
 fi
 if [ "$INSTALL_DOCKER" == "yes" ]; then
     echo -e "是否安装 Docker      : ${GREEN}是${NC}"
+    if [ "$USE_DOCKER_MIRROR" == "yes" ]; then
+        echo -e "  - 使用国内镜像安装   : ${GREEN}是${NC}"
+    else
+        echo -e "  - 使用国内镜像安装   : ${YELLOW}否 (使用官方源)${NC}"
+    fi
     if [ "$CONFIGURE_DOCKER_LOGS" == "yes" ]; then
         echo -e "  - 配置Docker日志轮换 : ${GREEN}是${NC}"
     else
@@ -581,7 +609,7 @@ if [ -n "$SWAP_SIZE_GB" ]; then
 fi
 if [ "$INSTALL_DOCKER" == "yes" ]; then
     install_docker
-    if [ "$CONFIGURE_DOCKER_LOGS" == "yes" ]; then
+    if [ $? -eq 0 ] && [ "$CONFIGURE_DOCKER_LOGS" == "yes" ]; then
         configure_docker_logs
     fi
 fi
@@ -623,14 +651,18 @@ free -h
 echo "--------------------------------"
 if [ "$INSTALL_DOCKER" == "yes" ]; then
     echo "----------  Docker状态  ----------"
-    docker --version
-    if [ -f "/etc/docker/daemon.json" ]; then
-        echo "日志轮换配置: 已配置 (/etc/docker/daemon.json)"
+    if command -v docker &> /dev/null; then
+        docker --version
+        if [ -f "/etc/docker/daemon.json" ]; then
+            echo "日志轮换配置: 已配置 (/etc/docker/daemon.json)"
+        fi
+        if [ -n "$DOCKER_USER" ]; then
+          log_warning "Docker已安装，用户 '$DOCKER_USER' 必须重新登录才能无须sudo使用docker！"
+        fi
+    else
+        log_error "Docker未成功安装。"
     fi
     echo "--------------------------------"
-    if [ -n "$DOCKER_USER" ]; then
-      log_warning "Docker已安装，用户 '$DOCKER_USER' 必须重新登录才能无须sudo使用docker！"
-    fi
 fi
 if [ "$ENABLE_BBR" == "yes" ]; then
     echo "----------   BBR状态    ----------"
