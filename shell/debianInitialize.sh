@@ -10,6 +10,8 @@
 # 5. 交互式设置时区
 # 6. 交互式选择是否创建Swap，并自定义大小
 # 7. 交互式选择是否安装Docker，并指定一个用户加入docker组
+# 8. 交互式选择是否配置Zram压缩
+# 9. 交互式选择是否开启BBR拥塞控制
 #
 # 使用方法: bash <(curl -sSL https://raw.githubusercontent.com/XyzenSun/MyScripts/refs/heads/main/shell/debianInitialize.sh) 
 #
@@ -29,6 +31,9 @@ TIMEZONE=""
 SWAP_SIZE_GB=""
 INSTALL_DOCKER=""
 DOCKER_USER=""
+ENABLE_ZRAM=""
+ZRAM_SIZE=""
+ENABLE_BBR=""
 
 # --- 函数定义 ---
 
@@ -114,7 +119,36 @@ ask_install_docker() {
     fi
 }
 
-# 5. (新) 更换软件源
+# 5. 询问是否启用Zram
+ask_zram() {
+    read -p "$(echo -e ${YELLOW}"是否需要启用Zram压缩 (内存压缩交换)? (y/n) [默认 n]: "${NC})" zram_choice
+    if [[ "$zram_choice" == "y" || "$zram_choice" == "Y" ]]; then
+        ENABLE_ZRAM="yes"
+        while true; do
+            read -p "$(echo -e ${YELLOW}"请输入Zram大小 (单位: MB, 例如: 1536): "${NC})" ZRAM_SIZE_INPUT
+            if [[ "$ZRAM_SIZE_INPUT" =~ ^[1-9][0-9]*$ ]]; then
+                ZRAM_SIZE=$ZRAM_SIZE_INPUT
+                break
+            else
+                log_error "无效输入！请输入一个正整数。"
+            fi
+        done
+    else
+        ENABLE_ZRAM="no"
+    fi
+}
+
+# 6. 询问是否启用BBR
+ask_bbr() {
+    read -p "$(echo -e ${YELLOW}"是否需要启用BBR拥塞控制算法 (提升网络性能)? (y/n) [默认 n]: "${NC})" bbr_choice
+    if [[ "$bbr_choice" == "y" || "$bbr_choice" == "Y" ]]; then
+        ENABLE_BBR="yes"
+    else
+        ENABLE_BBR="no"
+    fi
+}
+
+# 7. (新) 更换软件源
 change_apt_mirror() {
     log_info "正在准备更换APT软件源..."
     # 检查curl是否安装，这是换源脚本的前提
@@ -139,7 +173,7 @@ change_apt_mirror() {
     fi
 }
 
-# 6. 执行系统更新和软件安装
+# 8. 执行系统更新和软件安装
 install_software() {
     log_info "开始更新系统并安装必要软件 (ufw, curl, wget)..."
     apt-get update >/dev/null 2>&1 && apt-get install -y ufw curl wget
@@ -150,7 +184,7 @@ install_software() {
     log_success "基础软件安装完成。"
 }
 
-# 7. 配置防火墙
+# 9. 配置防火墙
 configure_firewall() {
     log_info "配置防火墙(UFW)..."
     ufw allow 80/tcp comment 'Allow HTTP' >/dev/null
@@ -174,14 +208,14 @@ configure_firewall() {
     fi
 }
 
-# 8. 设置时区
+# 10. 设置时区
 set_timezone() {
     log_info "设置时区为 ${TIMEZONE}..."
     timedatectl set-timezone ${TIMEZONE}
     log_success "时区设置完成。"
 }
 
-# 9. 创建Swap文件
+# 11. 创建Swap文件
 create_swap_file() {
     log_info "开始创建 ${SWAP_SIZE_GB}GB 大小的Swap文件..."
     fallocate -l ${SWAP_SIZE_GB}G /swapfile
@@ -198,7 +232,7 @@ create_swap_file() {
     log_success "Swap创建并激活成功!"
 }
 
-# 10. 安装Docker
+# 12. 安装Docker
 install_docker() {
     log_info "开始使用Docker官方脚本安装Docker..."
     curl -fsSL https://get.docker.com -o get-docker.sh
@@ -218,6 +252,78 @@ install_docker() {
     fi
 }
 
+# 13. 配置Zram
+configure_zram() {
+    log_info "开始安装和配置Zram..."
+    
+    # 安装 zram-tools
+    apt-get update >/dev/null 2>&1 && apt-get install -y zram-tools
+    if [ $? -ne 0 ]; then
+        log_error "安装 zram-tools 失败！"
+        return
+    fi
+    
+    # 备份原有配置（如果存在）
+    if [ -f /etc/default/zramswap ]; then
+        cp /etc/default/zramswap "/etc/default/zramswap.bak_$(date +%Y%m%d_%H%M%S)"
+        log_info "已备份原有Zram配置文件。"
+    fi
+    
+    # 创建新的配置文件
+    cat > /etc/default/zramswap << EOF
+# Compression algorithm (lz4 is fast and efficient)
+ALGO=lz4
+
+# Size in MB
+SIZE=${ZRAM_SIZE}
+
+# Priority (higher number = higher priority)
+PRIORITY=100
+EOF
+    
+    # 重启zramswap服务
+    systemctl restart zramswap.service
+    if [ $? -eq 0 ]; then
+        log_success "Zram配置完成并启用！"
+    else
+        log_error "Zram服务启动失败！"
+    fi
+}
+
+# 14. 配置BBR
+configure_bbr() {
+    log_info "开始配置BBR拥塞控制算法..."
+    
+    # 备份原有配置
+    cp /etc/sysctl.conf "/etc/sysctl.conf.bak_$(date +%Y%m%d_%H%M%S)"
+    log_info "已备份原有sysctl配置文件。"
+    
+    # 检查是否已经配置过BBR
+    if grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
+        log_warning "检测到BBR已配置，跳过重复配置。"
+        return
+    fi
+    
+    # 添加BBR配置
+    printf "%s\n" "net.core.default_qdisc=fq" "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    
+    # 立即生效
+    sysctl --system >/dev/null 2>&1
+    sysctl -p >/dev/null 2>&1
+    
+    # 检查是否生效
+    log_info "检查BBR配置状态..."
+    qdisc_output=$(sysctl net.core.default_qdisc 2>/dev/null | grep -o 'fq')
+    bbr_output=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -o 'bbr')
+    bbr_module=$(lsmod | grep bbr)
+    
+    if [[ "$qdisc_output" == "fq" && "$bbr_output" == "bbr" && -n "$bbr_module" ]]; then
+        log_success "BBR拥塞控制算法配置成功并已生效！"
+    else
+        log_warning "BBR配置完成，但可能需要重启系统才能完全生效。"
+    fi
+}
+
 
 # --- 主程序开始 ---
 
@@ -228,7 +334,7 @@ fi
 
 clear
 echo "====================================================="
-echo "      服务器初始化脚本 v3.3"
+echo "      服务器初始化脚本 v4.0"
 echo "====================================================="
 echo
 
@@ -238,6 +344,8 @@ ask_ssh_port
 ask_timezone
 ask_and_configure_swap
 ask_install_docker
+ask_zram
+ask_bbr
 
 # --- 显示配置摘要并请求最终确认 ---
 clear
@@ -266,6 +374,16 @@ if [ "$INSTALL_DOCKER" == "yes" ]; then
 else
     echo -e "是否安装 Docker      : ${YELLOW}否${NC}"
 fi
+if [ "$ENABLE_ZRAM" == "yes" ]; then
+    echo -e "启用 Zram 压缩       : ${YELLOW}是 (${ZRAM_SIZE}MB)${NC}"
+else
+    echo -e "启用 Zram 压缩       : ${YELLOW}否${NC}"
+fi
+if [ "$ENABLE_BBR" == "yes" ]; then
+    echo -e "启用 BBR 拥塞控制    : ${YELLOW}是${NC}"
+else
+    echo -e "启用 BBR 拥塞控制    : ${YELLOW}否${NC}"
+fi
 echo
 echo -e "脚本将执行以下操作:"
 [ "$CHANGE_MIRROR" == "yes" ] && echo -e " 1. ${GREEN}更换系统软件源 (APT Mirror) 以加速下载${NC}"
@@ -274,6 +392,8 @@ echo -e " 3. ${GREEN}配置 UFW 防火墙 (开放 80, 443, 22 和 ${SSH_PORT})${
 echo -e " 4. 设置系统时区"
 [ -n "$SWAP_SIZE_GB" ] && echo -e " 5. 创建 ${SWAP_SIZE_GB}GB Swap"
 [ "$INSTALL_DOCKER" == "yes" ] && echo -e " 6. 安装 Docker"
+[ "$ENABLE_ZRAM" == "yes" ] && echo -e " 7. 配置 Zram 压缩 (${ZRAM_SIZE}MB)"
+[ "$ENABLE_BBR" == "yes" ] && echo -e " 8. 启用 BBR 拥塞控制算法"
 echo
 echo -e "${RED}重要提示: 本脚本不会修改SSH服务本身！执行完毕后，您必须手动修改 /etc/ssh/sshd_config 文件中的端口，并重启SSH服务，才能使用新端口 ${SSH_PORT} 登录！${NC}"
 echo
@@ -303,7 +423,12 @@ fi
 if [ "$INSTALL_DOCKER" == "yes" ]; then
     install_docker
 fi
-
+if [ "$ENABLE_ZRAM" == "yes" ]; then
+    configure_zram
+fi
+if [ "$ENABLE_BBR" == "yes" ]; then
+    configure_bbr
+fi
 
 # --- 最终状态报告 ---
 echo
@@ -326,6 +451,18 @@ if [ "$INSTALL_DOCKER" == "yes" ]; then
     if [ -n "$DOCKER_USER" ]; then
       log_warning "Docker已安装，用户 '$DOCKER_USER' 必须重新登录才能无须sudo使用docker！"
     fi
+fi
+if [ "$ENABLE_ZRAM" == "yes" ]; then
+    echo "----------   Zram状态   ----------"
+    swapon --show
+    echo "--------------------------------"
+fi
+if [ "$ENABLE_BBR" == "yes" ]; then
+    echo "----------   BBR状态    ----------"
+    echo "Queue Discipline: $(sysctl net.core.default_qdisc 2>/dev/null)"
+    echo "Congestion Control: $(sysctl net.ipv4.tcp_congestion_control 2>/dev/null)"
+    echo "BBR Module: $(lsmod | grep bbr || echo 'Not loaded')"
+    echo "--------------------------------"
 fi
 
 echo -e "\n${RED}======================= 行动号召 ======================="
