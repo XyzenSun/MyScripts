@@ -2,18 +2,23 @@
 
 # ==============================================================================
 # Debian服务器初始化交互式脚本
-# 功能:
-# 1.交互式选择是否更换APT源
-# 2. 更新系统并安装 ufw, curl, wget
-# 3. 交互式设置防火墙要保护的SSH端口 (不会自动修改SSH服务)
-# 4. 配置 UFW 防火墙
-# 5. 交互式设置时区
-# 6. 交互式选择是否创建Swap，并自定义大小
-# 7. 交互式选择是否安装Docker，并指定一个用户加入docker组
-# 8. 交互式选择是否配置Zram压缩
-# 9. 交互式选择是否开启BBR拥塞控制
 #
-# 使用方法: bash <(curl -sSL https://raw.githubusercontent.com/XyzenSun/MyScripts/refs/heads/main/shell/debianInitialize.sh) 
+# 功能:
+# 1.  交互式选择是否更换APT源
+# 2.  更新系统并安装 ufw, curl, wget
+# 3.  交互式设置防火墙要保护的SSH端口 (不会自动修改SSH服务)
+# 4.  交互式选择并配置DNS服务器
+# 5.  配置 UFW 防火墙
+# 6.  交互式设置时区
+# 7.  交互式选择是否创建Swap，并自定义大小
+# 8.  交互式选择是否安装Docker，并:
+#     - 询问是否配置全局日志轮换
+#     - 指定一个用户加入docker组
+# 9.  交互式选择是否配置Zram压缩
+# 10. 交互式选择是否开启BBR拥塞控制
+# 11. 交互式选择是否启用unattended-upgrades自动安全更新
+#
+# 使用方法: bash <(curl -sSL https://raw.githubusercontent.com/XyzenSun/MyScripts/refs/heads/main/shell/debianInitialize.sh)
 #
 # ==============================================================================
 
@@ -30,10 +35,14 @@ SSH_PORT=""
 TIMEZONE=""
 SWAP_SIZE_GB=""
 INSTALL_DOCKER=""
+CONFIGURE_DOCKER_LOGS=""
 DOCKER_USER=""
 ENABLE_ZRAM=""
 ZRAM_SIZE=""
 ENABLE_BBR=""
+ENABLE_UNATTENDED_UPGRADES=""
+CHANGE_DNS=""
+DNS_SERVERS=""
 
 # --- 函数定义 ---
 
@@ -101,6 +110,15 @@ ask_install_docker() {
     read -p "$(echo -e ${YELLOW}"是否需要安装Docker? (y/n) [默认 n]: "${NC})" docker_choice
     if [[ "$docker_choice" == "y" || "$docker_choice" == "Y" ]]; then
         INSTALL_DOCKER="yes"
+        
+        # 询问是否配置日志轮换
+        read -p "$(echo -e ${YELLOW}"是否为Docker配置全局日志轮换 (10m*3个文件)? (y/n) [默认 y]: "${NC})" docker_log_choice
+        if [[ "$docker_log_choice" == "n" || "$docker_log_choice" == "N" ]]; then
+            CONFIGURE_DOCKER_LOGS="no"
+        else
+            CONFIGURE_DOCKER_LOGS="yes"
+        fi
+
         while true; do
             read -p "$(echo -e ${YELLOW}"请输入一个需要加入docker组的 [现有] 用户名 (该用户将无需sudo运行docker)，留空则跳过: "${NC})" DOCKER_USER_INPUT
             DOCKER_USER=$DOCKER_USER_INPUT
@@ -116,6 +134,7 @@ ask_install_docker() {
         done
     else
         INSTALL_DOCKER="no"
+        CONFIGURE_DOCKER_LOGS="no"
     fi
 }
 
@@ -148,10 +167,81 @@ ask_bbr() {
     fi
 }
 
-# 7. (新) 更换软件源
+# 7. (新) 询问是否启用自动安全更新
+ask_unattended_upgrades() {
+    read -p "$(echo -e ${YELLOW}"是否需要启用 unattended-upgrades 自动安全更新? (y/n) [默认 y]: "${NC})" unattended_choice
+    if [[ "$unattended_choice" == "n" || "$unattended_choice" == "N" ]]; then
+        ENABLE_UNATTENDED_UPGRADES="no"
+    else
+        ENABLE_UNATTENDED_UPGRADES="yes"
+    fi
+}
+
+# 8. 询问并配置DNS
+ask_dns() {
+    read -p "$(echo -e ${YELLOW}"是否需要更改系统的DNS服务器? (y/n) [默认 n]: "${NC})" dns_choice
+    if [[ "$dns_choice" != "y" && "$dns_choice" != "Y" ]]; then
+        CHANGE_DNS="no"
+        return
+    fi
+    CHANGE_DNS="yes"
+  
+    log_info "以下是可用的DNS服务器 (仅支持IPv4):"
+    echo -e "
+    ${GREEN}国内服务商:${NC}
+    [1] 腾讯 (DNSPod)      : 119.29.29.29
+    [2] 阿里 (AliDNS)      : 223.5.5.5, 223.6.6.6
+    [3] 114 DNS (纯净)     : 114.114.114.114, 114.114.115.115
+    [4] 114 DNS (安全)     : 114.114.114.119, 114.114.115.119
+    [5] 114 DNS (家庭)     : 114.114.114.110, 114.114.115.110
+    [6] 百度 (BaiduDNS)    : 180.76.76.76
+    ${GREEN}国外服务商:${NC}
+    [7] CloudFlare         : 1.1.1.1, 1.0.0.1
+    [8] Google             : 8.8.8.8, 8.8.4.4
+    [9] OpenDNS            : 208.67.222.222, 208.67.220.220
+    [10] IBM (Quad9)       : 9.9.9.9, 149.112.112.112
+    "
+  
+    while true; do
+        read -p "$(echo -e ${YELLOW}"请选择您要使用的DNS编号，可多选，用空格隔开 (例如: 2 7)，输入0取消: "${NC})" -a choices
+        DNS_SERVERS="" # 重置
+        for choice in "${choices[@]}"; do
+            case $choice in
+                1) DNS_SERVERS+="119.29.29.29 " ;;
+                2) DNS_SERVERS+="223.5.5.5 223.6.6.6 " ;;
+                3) DNS_SERVERS+="114.114.114.114 114.114.115.115 " ;;
+                4) DNS_SERVERS+="114.114.114.119 114.114.115.119 " ;;
+                5) DNS_SERVERS+="114.114.114.110 114.114.115.110 " ;;
+                6) DNS_SERVERS+="180.76.76.76 " ;;
+                7) DNS_SERVERS+="1.1.1.1 1.0.0.1 " ;;
+                8) DNS_SERVERS+="8.8.8.8 8.8.4.4 " ;;
+                9) DNS_SERVERS+="208.67.222.222 208.67.220.220 " ;;
+                10) DNS_SERVERS+="9.9.9.9 149.112.112.112 " ;;
+                0) DNS_SERVERS=""; CHANGE_DNS="no"; break ;;
+                *) log_warning "检测到无效选择: $choice";;
+            esac
+        done
+      
+        DNS_SERVERS=$(echo "$DNS_SERVERS" | xargs)
+      
+        if [[ "$CHANGE_DNS" == "no" ]]; then
+            log_info "用户取消了DNS设置。"
+            break
+        fi
+
+        if [ -n "$DNS_SERVERS" ]; then
+            log_success "您已选择的DNS服务器: $DNS_SERVERS"
+            break
+        else
+            log_error "无效选择，请重新输入。"
+        fi
+    done
+}
+
+
+# 9. 更换软件源
 change_apt_mirror() {
     log_info "正在准备更换APT软件源..."
-    # 检查curl是否安装，这是换源脚本的前提
     if ! command -v curl &> /dev/null; then
         log_warning "未找到 'curl' 命令，正在尝试安装..."
         apt-get update >/dev/null 2>&1
@@ -162,7 +252,7 @@ change_apt_mirror() {
         fi
         log_success "'curl' 安装成功。"
     fi
-    
+  
     log_info "即将执行换源脚本，请根据提示进行交互选择..."
     sleep 2
     bash <(curl -sSL https://linuxmirrors.cn/main.sh)
@@ -173,7 +263,7 @@ change_apt_mirror() {
     fi
 }
 
-# 8. 执行系统更新和软件安装
+# 10. 执行系统更新和软件安装
 install_software() {
     log_info "开始更新系统并安装必要软件 (ufw, curl, wget)..."
     apt-get update >/dev/null 2>&1 && apt-get install -y ufw curl wget
@@ -184,7 +274,25 @@ install_software() {
     log_success "基础软件安装完成。"
 }
 
-# 9. 配置防火墙
+# 11. (新) 配置自动安全更新
+configure_unattended_upgrades() {
+    log_info "开始安装并配置 unattended-upgrades..."
+    apt-get install -y unattended-upgrades
+    if [ $? -ne 0 ]; then
+        log_error "安装 unattended-upgrades 失败！"
+        return
+    fi
+    
+    dpkg-reconfigure -plow unattended-upgrades
+    
+    if [ -f "/etc/apt/apt.conf.d/20auto-upgrades" ]; then
+        log_success "unattended-upgrades 配置成功，系统将自动安装安全更新。"
+    else
+        log_error "配置 unattended-upgrades 失败，请手动检查。"
+    fi
+}
+
+# 12. 配置防火墙
 configure_firewall() {
     log_info "配置防火墙(UFW)..."
     ufw allow 80/tcp comment 'Allow HTTP' >/dev/null
@@ -208,14 +316,14 @@ configure_firewall() {
     fi
 }
 
-# 10. 设置时区
+# 13. 设置时区
 set_timezone() {
     log_info "设置时区为 ${TIMEZONE}..."
     timedatectl set-timezone ${TIMEZONE}
     log_success "时区设置完成。"
 }
 
-# 11. 创建Swap文件
+# 14. 创建Swap文件
 create_swap_file() {
     log_info "开始创建 ${SWAP_SIZE_GB}GB 大小的Swap文件..."
     fallocate -l ${SWAP_SIZE_GB}G /swapfile
@@ -232,7 +340,7 @@ create_swap_file() {
     log_success "Swap创建并激活成功!"
 }
 
-# 12. 安装Docker
+# 15. 安装Docker
 install_docker() {
     log_info "开始使用Docker官方脚本安装Docker..."
     curl -fsSL https://get.docker.com -o get-docker.sh
@@ -252,36 +360,57 @@ install_docker() {
     fi
 }
 
-# 13. 配置Zram
+# 16. (新) 配置Docker日志轮换
+configure_docker_logs() {
+    log_info "开始为Docker配置全局日志轮换..."
+    mkdir -p /etc/docker
+    
+    cat > /etc/docker/daemon.json << EOF
+{
+        "log-driver": "json-file",
+        "log-opts": {
+                "max-file": "3",
+                "max-size": "10m"
+        }
+}
+EOF
+
+    if [ $? -eq 0 ]; then
+        log_success "Docker日志配置文件 /etc/docker/daemon.json 创建成功。"
+        log_info "已将全局Docker日志设置为: 最多3个文件，每个文件最大10MB。"
+        log_info "您可以随时通过编辑 /etc/docker/daemon.json 文件来修改此配置。"
+        log_info "正在重启Docker以应用配置..."
+        systemctl restart docker
+        if [ $? -eq 0 ]; then
+            log_success "Docker重启成功，日志配置已生效。"
+        else
+            log_error "Docker重启失败，请手动执行 'systemctl restart docker'。"
+        fi
+    else
+        log_error "创建 /etc/docker/daemon.json 文件失败！"
+    fi
+}
+
+# 17. 配置Zram
 configure_zram() {
     log_info "开始安装和配置Zram..."
-    
-    # 安装 zram-tools
     apt-get update >/dev/null 2>&1 && apt-get install -y zram-tools
     if [ $? -ne 0 ]; then
         log_error "安装 zram-tools 失败！"
         return
     fi
-    
-    # 备份原有配置（如果存在）
     if [ -f /etc/default/zramswap ]; then
         cp /etc/default/zramswap "/etc/default/zramswap.bak_$(date +%Y%m%d_%H%M%S)"
         log_info "已备份原有Zram配置文件。"
     fi
-    
-    # 创建新的配置文件
     cat > /etc/default/zramswap << EOF
 # Compression algorithm (lz4 is fast and efficient)
 ALGO=lz4
-
 # Size in MB
 SIZE=${ZRAM_SIZE}
-
 # Priority (higher number = higher priority)
 PRIORITY=100
 EOF
-    
-    # 重启zramswap服务
     systemctl restart zramswap.service
     if [ $? -eq 0 ]; then
         log_success "Zram配置完成并启用！"
@@ -290,38 +419,42 @@ EOF
     fi
 }
 
-# 14. 配置BBR
+# 18. 配置BBR
 configure_bbr() {
     log_info "开始配置BBR拥塞控制算法..."
-    
-    # 备份原有配置
     cp /etc/sysctl.conf "/etc/sysctl.conf.bak_$(date +%Y%m%d_%H%M%S)"
     log_info "已备份原有sysctl配置文件。"
-    
-    # 检查是否已经配置过BBR
     if grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
         log_warning "检测到BBR已配置，跳过重复配置。"
         return
     fi
-    
-    # 添加BBR配置
     printf "%s\n" "net.core.default_qdisc=fq" "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
-    
-    # 立即生效
     sysctl --system >/dev/null 2>&1
     sysctl -p >/dev/null 2>&1
-    
-    # 检查是否生效
     log_info "检查BBR配置状态..."
     qdisc_output=$(sysctl net.core.default_qdisc 2>/dev/null | grep -o 'fq')
     bbr_output=$(sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -o 'bbr')
     bbr_module=$(lsmod | grep bbr)
-    
     if [[ "$qdisc_output" == "fq" && "$bbr_output" == "bbr" && -n "$bbr_module" ]]; then
         log_success "BBR拥塞控制算法配置成功并已生效！"
     else
         log_warning "BBR配置完成，但可能需要重启系统才能完全生效。"
     fi
+}
+
+# 19. 配置DNS
+configure_dns() {
+    log_info "开始配置DNS服务器..."
+    cp /etc/systemd/resolved.conf "/etc/systemd/resolved.conf.bak_$(date +%Y%m%d_%H%M%S)"
+    log_info "已备份原有DNS配置文件 /etc/systemd/resolved.conf"
+    sed -i -e 's/^#*DNS=.*/#&/' -e 's/^#*FallbackDNS=.*/#&/' /etc/systemd/resolved.conf
+    if ! grep -q "\[Resolve\]" /etc/systemd/resolved.conf; then
+        echo "[Resolve]" >> /etc/systemd/resolved.conf
+    fi
+    sed -i "/\[Resolve\]/a DNS=${DNS_SERVERS}" /etc/systemd/resolved.conf
+    systemctl restart systemd-resolved.service
+    ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+    log_success "DNS服务器已成功配置！"
 }
 
 
@@ -334,7 +467,7 @@ fi
 
 clear
 echo "====================================================="
-echo "      服务器初始化脚本 v4.0"
+echo "      服务器初始化脚本"
 echo "====================================================="
 echo
 
@@ -342,10 +475,12 @@ echo
 ask_change_mirror
 ask_ssh_port
 ask_timezone
+ask_dns
 ask_and_configure_swap
 ask_install_docker
 ask_zram
 ask_bbr
+ask_unattended_upgrades
 
 # --- 显示配置摘要并请求最终确认 ---
 clear
@@ -359,41 +494,58 @@ else
 fi
 echo -e "计划使用的SSH端口    : ${YELLOW}${SSH_PORT}${NC}"
 echo -e "系统时区             : ${YELLOW}${TIMEZONE}${NC}"
+if [ "$CHANGE_DNS" == "yes" ]; then
+    echo -e "DNS 服务器           : ${YELLOW}${DNS_SERVERS}${NC}"
+else
+    echo -e "DNS 服务器           : ${YELLOW}保持系统默认${NC}"
+fi
 if [ -n "$SWAP_SIZE_GB" ]; then
     echo -e "创建 Swap 大小       : ${YELLOW}${SWAP_SIZE_GB} GB${NC}"
 else
     echo -e "创建 Swap 大小       : ${YELLOW}不创建${NC}"
 fi
 if [ "$INSTALL_DOCKER" == "yes" ]; then
-    echo -e "是否安装 Docker      : ${YELLOW}是${NC}"
-    if [ -n "$DOCKER_USER" ]; then
-        echo -e "添加到docker组的用户 : ${YELLOW}${DOCKER_USER}${NC}"
+    echo -e "是否安装 Docker      : ${GREEN}是${NC}"
+    if [ "$CONFIGURE_DOCKER_LOGS" == "yes" ]; then
+        echo -e "  - 配置Docker日志轮换 : ${GREEN}是${NC}"
     else
-        echo -e "添加到docker组的用户 : ${YELLOW}未指定${NC}"
+        echo -e "  - 配置Docker日志轮换 : ${YELLOW}否${NC}"
+    fi
+    if [ -n "$DOCKER_USER" ]; then
+        echo -e "  - 添加到docker组的用户 : ${YELLOW}${DOCKER_USER}${NC}"
+    else
+        echo -e "  - 添加到docker组的用户 : ${YELLOW}未指定${NC}"
     fi
 else
     echo -e "是否安装 Docker      : ${YELLOW}否${NC}"
 fi
 if [ "$ENABLE_ZRAM" == "yes" ]; then
-    echo -e "启用 Zram 压缩       : ${YELLOW}是 (${ZRAM_SIZE}MB)${NC}"
+    echo -e "启用 Zram 压缩       : ${GREEN}是 (${ZRAM_SIZE}MB)${NC}"
 else
     echo -e "启用 Zram 压缩       : ${YELLOW}否${NC}"
 fi
 if [ "$ENABLE_BBR" == "yes" ]; then
-    echo -e "启用 BBR 拥塞控制    : ${YELLOW}是${NC}"
+    echo -e "启用 BBR 拥塞控制    : ${GREEN}是${NC}"
 else
     echo -e "启用 BBR 拥塞控制    : ${YELLOW}否${NC}"
+fi
+if [ "$ENABLE_UNATTENDED_UPGRADES" == "yes" ]; then
+    echo -e "自动安全更新         : ${GREEN}是${NC}"
+else
+    echo -e "自动安全更新         : ${YELLOW}否${NC}"
 fi
 echo
 echo -e "脚本将执行以下操作:"
 [ "$CHANGE_MIRROR" == "yes" ] && echo -e " 1. ${GREEN}更换系统软件源 (APT Mirror) 以加速下载${NC}"
 echo -e " 2. 安装 ufw, curl, wget 等基础软件"
-echo -e " 3. ${GREEN}配置 UFW 防火墙 (开放 80, 443, 22 和 ${SSH_PORT})${NC}"
-echo -e " 4. 设置系统时区"
-[ -n "$SWAP_SIZE_GB" ] && echo -e " 5. 创建 ${SWAP_SIZE_GB}GB Swap"
-[ "$INSTALL_DOCKER" == "yes" ] && echo -e " 6. 安装 Docker"
-[ "$ENABLE_ZRAM" == "yes" ] && echo -e " 7. 配置 Zram 压缩 (${ZRAM_SIZE}MB)"
-[ "$ENABLE_BBR" == "yes" ] && echo -e " 8. 启用 BBR 拥塞控制算法"
+[ "$ENABLE_UNATTENDED_UPGRADES" == "yes" ] && echo -e " 3. ${GREEN}启用 unattended-upgrades 自动安全更新${NC}"
+echo -e " 4. ${GREEN}配置 UFW 防火墙 (开放 80, 443, 22 和 ${SSH_PORT})${NC}"
+echo -e " 5. 设置系统时区"
+[ "$CHANGE_DNS" == "yes" ] && echo -e " 6. 更改系统DNS服务器"
+[ -n "$SWAP_SIZE_GB" ] && echo -e " 7. 创建 ${SWAP_SIZE_GB}GB Swap"
+[ "$INSTALL_DOCKER" == "yes" ] && echo -e " 8. 安装 Docker 并进行相应配置"
+[ "$ENABLE_ZRAM" == "yes" ] && echo -e " 9. 配置 Zram 压缩 (${ZRAM_SIZE}MB)"
+[ "$ENABLE_BBR" == "yes" ] && echo -e " 10. 启用 BBR 拥塞控制算法"
 echo
 echo -e "${RED}重要提示: 本脚本不会修改SSH服务本身！执行完毕后，您必须手动修改 /etc/ssh/sshd_config 文件中的端口，并重启SSH服务，才能使用新端口 ${SSH_PORT} 登录！${NC}"
 echo
@@ -408,20 +560,30 @@ fi
 log_info "配置已确认，3秒后开始执行..."
 sleep 3
 
-# 根据用户选择执行可选操作
 if [ "$CHANGE_MIRROR" == "yes" ]; then
     change_apt_mirror
 fi
 
 install_software
+
+if [ "$ENABLE_UNATTENDED_UPGRADES" == "yes" ]; then
+    configure_unattended_upgrades
+fi
+
 configure_firewall
 set_timezone
 
+if [ "$CHANGE_DNS" == "yes" ]; then
+    configure_dns
+fi
 if [ -n "$SWAP_SIZE_GB" ]; then
     create_swap_file
 fi
 if [ "$INSTALL_DOCKER" == "yes" ]; then
     install_docker
+    if [ "$CONFIGURE_DOCKER_LOGS" == "yes" ]; then
+        configure_docker_logs
+    fi
 fi
 if [ "$ENABLE_ZRAM" == "yes" ]; then
     configure_zram
@@ -440,22 +602,35 @@ echo "--------------------------------"
 echo "----------   时间状态   ----------"
 timedatectl status | grep "Time zone"
 echo "--------------------------------"
-echo "----------   Swap状态   ----------"
+if [ "$ENABLE_UNATTENDED_UPGRADES" == "yes" ]; then
+    echo "---------- 自动更新状态 ----------"
+    if [ -f "/etc/apt/apt.conf.d/20auto-upgrades" ]; then
+        echo "Unattended-upgrades: 配置文件存在，内容如下:"
+        cat /etc/apt/apt.conf.d/20auto-upgrades
+    else
+        echo "Unattended-upgrades: ${RED}配置文件未找到!${NC}"
+    fi
+    echo "--------------------------------"
+fi
+if [ "$CHANGE_DNS" == "yes" ]; then
+    echo "----------   DNS状态    ----------"
+    resolvectl status | grep "Current DNS Server" || systemd-resolve --status | grep "Current DNS Server"
+    echo "--------------------------------"
+fi
+echo "----------   Swap/Zram状态   ----------"
 swapon --show
 free -h
 echo "--------------------------------"
 if [ "$INSTALL_DOCKER" == "yes" ]; then
     echo "----------  Docker状态  ----------"
     docker --version
+    if [ -f "/etc/docker/daemon.json" ]; then
+        echo "日志轮换配置: 已配置 (/etc/docker/daemon.json)"
+    fi
     echo "--------------------------------"
     if [ -n "$DOCKER_USER" ]; then
       log_warning "Docker已安装，用户 '$DOCKER_USER' 必须重新登录才能无须sudo使用docker！"
     fi
-fi
-if [ "$ENABLE_ZRAM" == "yes" ]; then
-    echo "----------   Zram状态   ----------"
-    swapon --show
-    echo "--------------------------------"
 fi
 if [ "$ENABLE_BBR" == "yes" ]; then
     echo "----------   BBR状态    ----------"
