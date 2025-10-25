@@ -135,7 +135,7 @@ do
     current_day=\$(date +%d)
 
     # 计算vnStat的开始和结束日期
-    if [[ \$current_day -ge \$reset_day ]]; then
+    if [[ \$(( 10#\$current_day )) -ge \$(( 10#\$reset_day )) ]]; then
         begin_date="\$current_year-\$current_month-\$reset_day"
         next_month=\$(date -d "\$begin_date +1 month" +%m)
         next_year=\$(date -d "\$begin_date +1 month" +%Y)
@@ -147,13 +147,26 @@ do
         begin_date="\$prev_year-\$prev_month-\$reset_day"
     fi
 
-    # 检查是否是重置日（每月第一天）
-    if [[ \$current_day -eq \$reset_day ]]; then
-        # 重置流量统计
-        log_message "重置流量统计 - 清空vnStat数据库"
-        vnstat -i "\$nic" --delete > /dev/null 2>&1
-        # 等待数据库重新初始化
-        sleep 10
+    # 检查是否是重置日
+    if [[ \$(( 10#\$current_day )) -eq \$(( 10#\$reset_day )) ]]; then
+        # 使用年月作为重置标志文件名
+        reset_flag_file="/tmp/bandwidth_reset_\$current_year-\$current_month"
+        
+        # 检查这个月是否已经重置过
+        if [ ! -f "\$reset_flag_file" ]; then
+            # 重置流量统计
+            log_message "重置流量统计 - 清空vnStat数据库"
+            vnstat -i "\$nic" --delete > /dev/null 2>&1
+            # 创建重置标志文件
+            touch "\$reset_flag_file"
+            log_message "已创建重置标志: \$reset_flag_file"
+            # 等待数据库重新初始化
+            sleep 30
+        else
+            log_message "本月已重置过流量统计，跳过重置"
+        fi
+        # 重置日当天无需检查流量，直接进入下一次循环
+        sleep \$check_interval
         continue
     fi
 
